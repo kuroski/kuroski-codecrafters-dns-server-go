@@ -47,6 +47,28 @@ func (h *DNSHeader) Serialize() []byte {
 // Create a new DNS reply message based on the specified values
 func createDNSReply() []byte {
 	// Construct the 16-bit Flags field
+	// | QR  | OPCODE |  AA | TC | RD | RA | Z   | RCODE |
+	// |  1  | 0000   |  1  |  0 |  0 |  0 | 000 | 0000  |
+	// ---------------------------------------------------
+	//  16-15  14-11    10    9    8    7    6-4   3-0
+	// ---------------------------------------------------
+	// QR = 1
+	// OPCODE = 0 (0000)
+	// AA = 1
+	// TC = 0
+	// RD = 0
+	// RA = 0
+	// Z = 0 (000)
+	// RCODE = 0 (0000)
+	// ---------------------------------------------------
+	// 1000 0000 0000 0000  (QR << 15)
+	// OR 0000 0000 0000 0000  (OPCODE << 11)
+	// OR 0000 0100 0000 0000  (AA << 10)
+	// OR 0000 0000 0000 0000  (TC << 9)
+	// OR 0000 0000 0000 0000  (RD << 8)
+	// OR 0000 0000 0000 0000  (RA << 7)
+	// OR 0000 0000 0000 0000  (RCODE)
+	// = 1000 0100 0000 0000 (combined)
 	flags := (queryResponse << 15) | // QR bit (1 bit)
 		(opcode << 11) | // OPCODE (4 bits)
 		(authoritativeAnswer << 10) | // AA bit (1 bit)
