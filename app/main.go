@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 )
 
 const (
@@ -44,8 +45,34 @@ func (h *DNSHeader) Serialize() []byte {
 	return buf
 }
 
+type DNSQuestion struct {
+	Name  string
+	Type  uint16
+	Class uint16
+}
+
+func (q *DNSQuestion) Serialize() []byte {
+	var buf []byte
+	labels := strings.Split(q.Name, ".")
+	for _, label := range labels {
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, []byte(label)...)
+	}
+	buf = append(buf, 0) // end of the Name
+
+	qType := make([]byte, 2)
+	binary.BigEndian.PutUint16(qType, q.Type)
+	buf = append(buf, qType...)
+
+	class := make([]byte, 2)
+	binary.BigEndian.PutUint16(class, q.Class)
+	buf = append(buf, class...)
+
+	return buf
+}
+
 // Create a new DNS reply message based on the specified values
-func createDNSReply() []byte {
+func createDNSReply(question DNSQuestion) []byte {
 	// Construct the 16-bit Flags field
 	// | QR  | OPCODE |  AA | TC | RD | RA | Z   | RCODE |
 	// |  1  | 0000   |  1  |  0 |  0 |  0 | 000 | 0000  |
@@ -85,16 +112,54 @@ func createDNSReply() []byte {
 		NSCOUNT: authorityCount,
 		ARCOUNT: additionalCount,
 	}
-	return header.Serialize()
+	questionBytes := question.Serialize()
+	return append(header.Serialize(), questionBytes...)
+}
+
+func parseDNSQuestion(data []byte) (DNSQuestion, error) {
+	var question DNSQuestion
+
+	// Decode Name
+	var name []string
+	for {
+		labelSize := int(data[0])
+		if labelSize == 0 {
+			break
+		}
+
+		name = append(name, string(data[1:labelSize+1]))
+		data = data[labelSize+1:]
+	}
+	question.Name = strings.Join(name, ".")
+
+	// Consume the 0 byte - \x00 is the null byte that terminates the domain name
+	data = data[1:]
+
+	// Decode Type and Class
+	if len(data) < 4 {
+		return question, fmt.Errorf("invalid question format")
+	}
+	question.Type = binary.BigEndian.Uint16(data[:2])
+	data = data[2:]
+	question.Class = binary.BigEndian.Uint16(data[:2])
+
+	return question, nil
 }
 
 func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	// Log the received packet
 	log.Printf("Received DNS query from %s", addr.String())
 
+	// Parse the incoming DNS question
+	question, err := parseDNSQuestion(data[12:]) // Skip the first 12 bytes (DNS header)
+	if err != nil {
+		log.Printf("Failed to parse DNS question: %v", err)
+		return
+	}
+
 	// Generate DNS reply
-	reply := createDNSReply()
-	_, err := conn.WriteToUDP(reply, addr)
+	reply := createDNSReply(question)
+	_, err = conn.WriteToUDP(reply, addr)
 	if err != nil {
 		log.Printf("Failed to send DNS reply: %v", err)
 		return
