@@ -17,7 +17,7 @@ const (
 	recursionDesired    = 0 // RD bit for recursion desired (0: do not ask recursive query)
 	recursionAvailable  = 0 // RA bit for recursion available (0: recursion not available)
 	responseCode        = 0 // RCODE bits for response code (0: no error)
-	questionCount       = 0 // QDCOUNT for the number of question entries (0 for this example)
+	questionCount       = 1 // QDCOUNT for the number of question entries (0 for this example)
 	answerCount         = 0 // ANCOUNT for the number of answer entries (0 for this example)
 	authorityCount      = 0 // NSCOUNT for the number of authority records (0 for this example)
 	additionalCount     = 0 // ARCOUNT for the number of additional records (0 for this example)
