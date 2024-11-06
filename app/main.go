@@ -8,21 +8,6 @@ import (
 	"strings"
 )
 
-const (
-	packetID            = 1234
-	queryResponse       = 1 // QR bit indicates a query (0) or response (1)
-	opcode              = 0 // OPCODE bits for standard query
-	authoritativeAnswer = 0 // AA bit for authoritative answer (0: non-authoritative)
-	truncation          = 0 // TC bit for truncation (0: not truncated)
-	recursionDesired    = 0 // RD bit for recursion desired (0: do not ask recursive query)
-	recursionAvailable  = 0 // RA bit for recursion available (0: recursion not available)
-	responseCode        = 0 // RCODE bits for response code (0: no error)
-	questionCount       = 1 // QDCOUNT for the number of question entries (0 for this example)
-	answerCount         = 1 // ANCOUNT for the number of answer entries (0 for this example)
-	authorityCount      = 0 // NSCOUNT for the number of authority records (0 for this example)
-	additionalCount     = 0 // ARCOUNT for the number of additional records (0 for this example)
-)
-
 // DNSHeader represents a DNS message header
 type DNSHeader struct {
 	ID      uint16 // Packet Identifier (16 bits)
@@ -43,6 +28,16 @@ func (h *DNSHeader) Serialize() []byte {
 	binary.BigEndian.PutUint16(buf[8:10], h.NSCOUNT)
 	binary.BigEndian.PutUint16(buf[10:12], h.ARCOUNT)
 	return buf
+}
+
+// Parse parses a byte array into a DNSHeader struct
+func (h *DNSHeader) Parse(data []byte) {
+	h.ID = binary.BigEndian.Uint16(data[0:2])
+	h.Flags = binary.BigEndian.Uint16(data[2:4])
+	h.QDCOUNT = binary.BigEndian.Uint16(data[4:6])
+	h.ANCOUNT = binary.BigEndian.Uint16(data[6:8])
+	h.NSCOUNT = binary.BigEndian.Uint16(data[8:10])
+	h.ARCOUNT = binary.BigEndian.Uint16(data[10:12])
 }
 
 type DNSQuestion struct {
@@ -112,7 +107,7 @@ func (a *DNSAnswer) Serialize() []byte {
 }
 
 // Create a new DNS reply message based on the specified values
-func createDNSReply(question DNSQuestion, answer DNSAnswer) []byte {
+func createDNSReply(header DNSHeader, question DNSQuestion, answer DNSAnswer) []byte {
 	// Construct the 16-bit Flags field
 	// | QR  | OPCODE |  AA | TC | RD | RA | Z   | RCODE |
 	// |  1  | 0000   |  1  |  0 |  0 |  0 | 000 | 0000  |
@@ -136,24 +131,24 @@ func createDNSReply(question DNSQuestion, answer DNSAnswer) []byte {
 	// OR 0000 0000 0000 0000  (RA << 7)
 	// OR 0000 0000 0000 0000  (RCODE)
 	// = 1000 0100 0000 0000 (combined)
-	flags := (queryResponse << 15) | // QR bit (1 bit)
-		(opcode << 11) | // OPCODE (4 bits)
-		(authoritativeAnswer << 10) | // AA bit (1 bit)
-		(truncation << 9) | // TC bit (1 bit)
-		(recursionDesired << 8) | // RD bit (1 bit)
-		(recursionAvailable << 7) | // RA bit (1 bit)
-		(responseCode) // RCODE (4 bits)
+	flags := (1 << 15) | // QR bit (1 bit)
+		(header.Flags & 0x7800) | // OPCODE (4 bits) - mask: 0111 1000 0000 0000
+		(header.Flags & 0x0400) | // AA bit (1 bit) - mask: 0000 0100 0000 0000
+		(0 << 9) | // TC bit (1 bit)
+		(header.Flags & 0x0100) | // RD bit (1 bit) - mask: 0000 0001 0000 0000
+		(1 << 7) | // RA bit (1 bit)
+		(uint16(4) & 0x00FF) // RCODE (4 bits)
 
-	header := &DNSHeader{
-		ID:      packetID,
-		Flags:   uint16(flags),
-		QDCOUNT: questionCount,
-		ANCOUNT: answerCount,
-		NSCOUNT: authorityCount,
-		ARCOUNT: additionalCount,
+	replyHeader := &DNSHeader{
+		ID:      header.ID,
+		Flags:   flags,
+		QDCOUNT: 1,
+		ANCOUNT: 1,
+		NSCOUNT: 0,
+		ARCOUNT: 0,
 	}
 
-	return append(append(header.Serialize(), question.Serialize()...), answer.Serialize()...)
+	return append(append(replyHeader.Serialize(), question.Serialize()...), answer.Serialize()...)
 }
 
 func parseDNSQuestion(data []byte) (DNSQuestion, error) {
@@ -190,6 +185,9 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	// Log the received packet
 	log.Printf("Received DNS query from %s", addr.String())
 
+	var header DNSHeader
+	header.Parse(data)
+
 	// Parse the incoming DNS question
 	question, err := parseDNSQuestion(data[12:]) // Skip the first 12 bytes (DNS header)
 	if err != nil {
@@ -208,7 +206,7 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	}
 
 	// Generate DNS reply
-	reply := createDNSReply(question, answer)
+	reply := createDNSReply(header, question, answer)
 	_, err = conn.WriteToUDP(reply, addr)
 	if err != nil {
 		log.Printf("Failed to send DNS reply: %v", err)
