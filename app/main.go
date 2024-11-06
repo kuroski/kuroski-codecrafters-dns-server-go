@@ -18,7 +18,7 @@ const (
 	recursionAvailable  = 0 // RA bit for recursion available (0: recursion not available)
 	responseCode        = 0 // RCODE bits for response code (0: no error)
 	questionCount       = 1 // QDCOUNT for the number of question entries (0 for this example)
-	answerCount         = 0 // ANCOUNT for the number of answer entries (0 for this example)
+	answerCount         = 1 // ANCOUNT for the number of answer entries (0 for this example)
 	authorityCount      = 0 // NSCOUNT for the number of authority records (0 for this example)
 	additionalCount     = 0 // ARCOUNT for the number of additional records (0 for this example)
 )
@@ -71,8 +71,48 @@ func (q *DNSQuestion) Serialize() []byte {
 	return buf
 }
 
+type DNSAnswer struct {
+	Name     string
+	Type     uint16
+	Class    uint16
+	TTL      uint32
+	RDLength uint16
+	RData    []byte
+}
+
+func (a *DNSAnswer) Serialize() []byte {
+	var buf []byte
+
+	labels := strings.Split(a.Name, ".")
+	for _, label := range labels {
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, []byte(label)...)
+	}
+	buf = append(buf, 0) // end of the Name
+
+	typeBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(typeBytes, a.Type)
+	buf = append(buf, typeBytes...)
+
+	classBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(classBytes, a.Class)
+	buf = append(buf, classBytes...)
+
+	ttlBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(ttlBytes, a.TTL)
+	buf = append(buf, ttlBytes...)
+
+	rdLengthBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(rdLengthBytes, a.RDLength)
+	buf = append(buf, rdLengthBytes...)
+
+	buf = append(buf, a.RData...)
+
+	return buf
+}
+
 // Create a new DNS reply message based on the specified values
-func createDNSReply(question DNSQuestion) []byte {
+func createDNSReply(question DNSQuestion, answer DNSAnswer) []byte {
 	// Construct the 16-bit Flags field
 	// | QR  | OPCODE |  AA | TC | RD | RA | Z   | RCODE |
 	// |  1  | 0000   |  1  |  0 |  0 |  0 | 000 | 0000  |
@@ -112,8 +152,8 @@ func createDNSReply(question DNSQuestion) []byte {
 		NSCOUNT: authorityCount,
 		ARCOUNT: additionalCount,
 	}
-	questionBytes := question.Serialize()
-	return append(header.Serialize(), questionBytes...)
+
+	return append(append(header.Serialize(), question.Serialize()...), answer.Serialize()...)
 }
 
 func parseDNSQuestion(data []byte) (DNSQuestion, error) {
@@ -157,8 +197,18 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 		return
 	}
 
+	// Construct a sample answer
+	answer := DNSAnswer{
+		Name:     question.Name,
+		Type:     1, // A record
+		Class:    1, // IN (Internet)
+		TTL:      60,
+		RDLength: 4,
+		RData:    []byte{8, 8, 8, 8},
+	}
+
 	// Generate DNS reply
-	reply := createDNSReply(question)
+	reply := createDNSReply(question, answer)
 	_, err = conn.WriteToUDP(reply, addr)
 	if err != nil {
 		log.Printf("Failed to send DNS reply: %v", err)
