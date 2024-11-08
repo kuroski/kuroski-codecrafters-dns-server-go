@@ -107,7 +107,7 @@ func (a *DNSAnswer) Serialize() []byte {
 }
 
 // Create a new DNS reply message based on the specified values
-func createDNSReply(header DNSHeader, question DNSQuestion, answer DNSAnswer) []byte {
+func createDNSReply(header DNSHeader, questions []DNSQuestion, answers []DNSAnswer) []byte {
 	// Construct the 16-bit Flags field
 	// | QR  | OPCODE |  AA | TC | RD | RA | Z   | RCODE |
 	// |  1  | 0000   |  1  |  0 |  0 |  0 | 000 | 0000  |
@@ -142,43 +142,59 @@ func createDNSReply(header DNSHeader, question DNSQuestion, answer DNSAnswer) []
 	replyHeader := &DNSHeader{
 		ID:      header.ID,
 		Flags:   flags,
-		QDCOUNT: 1,
-		ANCOUNT: 1,
-		NSCOUNT: 0,
-		ARCOUNT: 0,
+		QDCOUNT: header.QDCOUNT,
+		ANCOUNT: uint16(len(answers)),
+		NSCOUNT: header.NSCOUNT,
+		ARCOUNT: header.ARCOUNT,
 	}
 
-	return append(append(replyHeader.Serialize(), question.Serialize()...), answer.Serialize()...)
+	var questionsBinary []byte
+	for _, question := range questions {
+		questionsBinary = append(questionsBinary, question.Serialize()...)
+	}
+
+	var answersBinary []byte
+	for _, answer := range answers {
+		answersBinary = append(answersBinary, answer.Serialize()...)
+	}
+
+	return append(append(replyHeader.Serialize(), questionsBinary...), answersBinary...)
 }
 
-func parseDNSQuestion(data []byte) (DNSQuestion, error) {
-	var question DNSQuestion
+func parseDNSQuestions(data []byte, header DNSHeader) ([]DNSQuestion, error) {
+	questions := make([]DNSQuestion, header.QDCOUNT)
 
-	// Decode Name
-	var name []string
-	for {
-		labelSize := int(data[0])
-		if labelSize == 0 {
-			break
+	for i := range questions {
+		var question DNSQuestion
+
+		// Decode Name
+		var name []string
+		for {
+			labelSize := int(data[0])
+			if labelSize == 0 {
+				break
+			}
+
+			name = append(name, string(data[1:labelSize+1]))
+			data = data[labelSize+1:]
 		}
+		question.Name = strings.Join(name, ".")
 
-		name = append(name, string(data[1:labelSize+1]))
-		data = data[labelSize+1:]
+		// Consume the 0 byte - \x00 is the null byte that terminates the domain name
+		data = data[1:]
+
+		// Decode Type and Class
+		if len(data) < 4 {
+			return questions, fmt.Errorf("invalid question format")
+		}
+		question.Type = binary.BigEndian.Uint16(data[:2])
+		data = data[2:]
+		question.Class = binary.BigEndian.Uint16(data[:2])
+
+		questions[i] = question
 	}
-	question.Name = strings.Join(name, ".")
 
-	// Consume the 0 byte - \x00 is the null byte that terminates the domain name
-	data = data[1:]
-
-	// Decode Type and Class
-	if len(data) < 4 {
-		return question, fmt.Errorf("invalid question format")
-	}
-	question.Type = binary.BigEndian.Uint16(data[:2])
-	data = data[2:]
-	question.Class = binary.BigEndian.Uint16(data[:2])
-
-	return question, nil
+	return questions, nil
 }
 
 func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
@@ -188,25 +204,28 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	var header DNSHeader
 	header.Parse(data)
 
-	// Parse the incoming DNS question
-	question, err := parseDNSQuestion(data[12:]) // Skip the first 12 bytes (DNS header)
+	// Parse the incoming DNS questions
+	questions, err := parseDNSQuestions(data[12:], header) // Skip the first 12 bytes (DNS header)
 	if err != nil {
 		log.Printf("Failed to parse DNS question: %v", err)
 		return
 	}
 
-	// Construct a sample answer
-	answer := DNSAnswer{
-		Name:     question.Name,
-		Type:     1, // A record
-		Class:    1, // IN (Internet)
-		TTL:      60,
-		RDLength: 4,
-		RData:    []byte{8, 8, 8, 8},
+	answers := make([]DNSAnswer, header.QDCOUNT)
+	for i := range answers {
+		// Construct a sample answer
+		answers[i] = DNSAnswer{
+			Name:     questions[i].Name,
+			Type:     1, // A record
+			Class:    1, // IN (Internet)
+			TTL:      60,
+			RDLength: 4,
+			RData:    []byte{8, 8, 8, 8},
+		}
 	}
 
 	// Generate DNS reply
-	reply := createDNSReply(header, question, answer)
+	reply := createDNSReply(header, questions, answers)
 	_, err = conn.WriteToUDP(reply, addr)
 	if err != nil {
 		log.Printf("Failed to send DNS reply: %v", err)
