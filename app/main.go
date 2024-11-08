@@ -132,10 +132,10 @@ func createDNSReply(header DNSHeader, questions []DNSQuestion, answers []DNSAnsw
 	// OR 0000 0000 0000 0000  (RCODE)
 	// = 1000 0100 0000 0000 (combined)
 	flags := (1 << 15) | // QR bit (1 bit)
-		(header.Flags & 0x7800) | // OPCODE (4 bits) - mask: 0111 1000 0000 0000
-		(header.Flags & 0x0400) | // AA bit (1 bit) - mask: 0000 0100 0000 0000
-		(0 << 9) | // TC bit (1 bit)
-		(header.Flags & 0x0100) | // RD bit (1 bit) - mask: 0000 0001 0000 0000
+		//(header.Flags & 0x7800) | // OPCODE (4 bits) - mask: 0111 1000 0000 0000
+		//(header.Flags & 0x0400) | // AA bit (1 bit) - mask: 0000 0100 0000 0000
+		//(0 << 9) | // TC bit (1 bit)
+		//(header.Flags & 0x0100) | // RD bit (1 bit) - mask: 0000 0001 0000 0000
 		(1 << 7) | // RA bit (1 bit)
 		(uint16(4) & 0x00FF) // RCODE (4 bits)
 
@@ -144,8 +144,8 @@ func createDNSReply(header DNSHeader, questions []DNSQuestion, answers []DNSAnsw
 		Flags:   flags,
 		QDCOUNT: header.QDCOUNT,
 		ANCOUNT: uint16(len(answers)),
-		NSCOUNT: header.NSCOUNT,
-		ARCOUNT: header.ARCOUNT,
+		NSCOUNT: 0,
+		ARCOUNT: 0,
 	}
 
 	var questionsBinary []byte
@@ -161,39 +161,71 @@ func createDNSReply(header DNSHeader, questions []DNSQuestion, answers []DNSAnsw
 	return append(append(replyHeader.Serialize(), questionsBinary...), answersBinary...)
 }
 
+func parseName(data []byte, off int) (string, int, error) {
+	var name []string
+	originalOffset := off
+	for {
+		if len(data) <= off {
+			return "", 0, fmt.Errorf("out of bounds")
+		}
+
+		labelSize := int(data[off])
+		if labelSize == 0 {
+			off++
+			break
+		}
+
+		// check if the message is compressed
+		// https://www.rfc-editor.org/rfc/rfc1035#section-4.1.4
+		// 0xC0 == 1100 0000 -> check if the two first bits are both 1
+		if labelSize&0xC0 == 0xC0 {
+			// if is a compressed label, extract the pointer
+			// 0x3FFF == 0011 1111 1111 1111 --> get the actual offset from the 14 remaining bits after stripping off the highest two bits used for compression
+			ptr := binary.BigEndian.Uint16(data[off:off+2]) & 0x3FFF
+			subName, _, err := parseName(data, int(ptr))
+			if err != nil {
+				return "", 0, err
+			}
+			name = append(name, subName)
+			off += 2
+			break
+		}
+		if len(data) <= off+labelSize {
+			return "", 0, fmt.Errorf("out of bounds")
+		}
+		name = append(name, string(data[off+1:off+1+labelSize]))
+		off += labelSize + 1
+	}
+	if originalOffset == off {
+		originalOffset += 1
+	}
+	return strings.Join(name, "."), off, nil
+}
+
 func parseDNSQuestions(data []byte, header DNSHeader) ([]DNSQuestion, error) {
 	questions := make([]DNSQuestion, header.QDCOUNT)
+	offset := 0
 
 	for i := range questions {
 		var question DNSQuestion
+		var err error
 
-		// Decode Name
-		var name []string
-		for {
-			labelSize := int(data[0])
-			if labelSize == 0 {
-				break
-			}
-
-			name = append(name, string(data[1:labelSize+1]))
-			data = data[labelSize+1:]
+		question.Name, offset, err = parseName(data, offset)
+		if err != nil {
+			return questions, err
 		}
-		question.Name = strings.Join(name, ".")
 
-		// Consume the 0 byte - \x00 is the null byte that terminates the domain name
-		data = data[1:]
-
-		// Decode Type and Class
-		if len(data) < 4 {
+		if len(data) < offset+4 {
 			return questions, fmt.Errorf("invalid question format")
 		}
-		question.Type = binary.BigEndian.Uint16(data[:2])
-		data = data[2:]
-		question.Class = binary.BigEndian.Uint16(data[:2])
+
+		question.Type = binary.BigEndian.Uint16(data[offset : offset+2])
+		offset += 2
+		question.Class = binary.BigEndian.Uint16(data[offset : offset+2])
+		offset += 2
 
 		questions[i] = question
 	}
-
 	return questions, nil
 }
 
@@ -211,11 +243,11 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 		return
 	}
 
-	answers := make([]DNSAnswer, header.QDCOUNT)
-	for i := range answers {
+	answers := make([]DNSAnswer, len(questions))
+	for i, question := range questions {
 		// Construct a sample answer
 		answers[i] = DNSAnswer{
-			Name:     questions[i].Name,
+			Name:     question.Name,
 			Type:     1, // A record
 			Class:    1, // IN (Internet)
 			TTL:      60,
