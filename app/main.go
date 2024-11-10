@@ -53,7 +53,7 @@ func (q *DNSQuestion) Serialize() []byte {
 		buf = append(buf, byte(len(label)))
 		buf = append(buf, []byte(label)...)
 	}
-	buf = append(buf, 0) // end of the Name
+	buf = append(buf, 0)
 
 	qType := make([]byte, 2)
 	binary.BigEndian.PutUint16(qType, q.Type)
@@ -83,7 +83,7 @@ func (a *DNSAnswer) Serialize() []byte {
 		buf = append(buf, byte(len(label)))
 		buf = append(buf, []byte(label)...)
 	}
-	buf = append(buf, 0) // end of the Name
+	buf = append(buf, 0)
 
 	typeBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(typeBytes, a.Type)
@@ -132,10 +132,10 @@ func createDNSReply(header DNSHeader, questions []DNSQuestion, answers []DNSAnsw
 	// OR 0000 0000 0000 0000  (RCODE)
 	// = 1000 0100 0000 0000 (combined)
 	flags := (1 << 15) | // QR bit (1 bit)
-		//(header.Flags & 0x7800) | // OPCODE (4 bits) - mask: 0111 1000 0000 0000
-		//(header.Flags & 0x0400) | // AA bit (1 bit) - mask: 0000 0100 0000 0000
-		//(0 << 9) | // TC bit (1 bit)
-		//(header.Flags & 0x0100) | // RD bit (1 bit) - mask: 0000 0001 0000 0000
+		(header.Flags & 0x7800) | // OPCODE (4 bits) - mask: 0111 1000 0000 0000
+		(header.Flags & 0x0400) | // AA bit (1 bit) - mask: 0000 0100 0000 0000
+		(0 << 9) | // TC bit (1 bit)
+		(header.Flags & 0x0100) | // RD bit (1 bit) - mask: 0000 0001 0000 0000
 		(1 << 7) | // RA bit (1 bit)
 		(uint16(4) & 0x00FF) // RCODE (4 bits)
 
@@ -161,45 +161,27 @@ func createDNSReply(header DNSHeader, questions []DNSQuestion, answers []DNSAnsw
 	return append(append(replyHeader.Serialize(), questionsBinary...), answersBinary...)
 }
 
-func parseName(data []byte, off int) (string, int, error) {
-	var name []string
-	originalOffset := off
+func parseName(data []byte, offset int) (string, int, error) {
+	var nameParts []string
+
 	for {
-		if len(data) <= off {
-			return "", 0, fmt.Errorf("out of bounds")
+		if offset >= len(data) {
+			log.Printf("parseName: offset %d out of bounds (data length %d)", offset, len(data))
+			return "", 0, fmt.Errorf("offset out of bounds")
 		}
 
-		labelSize := int(data[off])
-		if labelSize == 0 {
-			off++
+		labelLength := int(data[offset])
+		if labelLength == 0 {
+			offset++
 			break
 		}
 
-		// check if the message is compressed
-		// https://www.rfc-editor.org/rfc/rfc1035#section-4.1.4
-		// 0xC0 == 1100 0000 -> check if the two first bits are both 1
-		if labelSize&0xC0 == 0xC0 {
-			// if is a compressed label, extract the pointer
-			// 0x3FFF == 0011 1111 1111 1111 --> get the actual offset from the 14 remaining bits after stripping off the highest two bits used for compression
-			ptr := binary.BigEndian.Uint16(data[off:off+2]) & 0x3FFF
-			subName, _, err := parseName(data, int(ptr))
-			if err != nil {
-				return "", 0, err
-			}
-			name = append(name, subName)
-			off += 2
-			break
-		}
-		if len(data) <= off+labelSize {
-			return "", 0, fmt.Errorf("out of bounds")
-		}
-		name = append(name, string(data[off+1:off+1+labelSize]))
-		off += labelSize + 1
+		nameParts = append(nameParts, string(data[offset+1:offset+1+labelLength]))
+		offset += 1 + labelLength
 	}
-	if originalOffset == off {
-		originalOffset += 1
-	}
-	return strings.Join(name, "."), off, nil
+
+	name := strings.Join(nameParts, ".")
+	return name, offset, nil
 }
 
 func parseDNSQuestions(data []byte, header DNSHeader) ([]DNSQuestion, error) {
@@ -231,10 +213,11 @@ func parseDNSQuestions(data []byte, header DNSHeader) ([]DNSQuestion, error) {
 
 func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	// Log the received packet
-	log.Printf("Received DNS query from %s", addr.String())
+	log.Printf("Received DNS query from %s with data: %v", addr.String(), data)
 
 	var header DNSHeader
 	header.Parse(data)
+	log.Printf("Parsed DNS header: %+v", header)
 
 	// Parse the incoming DNS questions
 	questions, err := parseDNSQuestions(data[12:], header) // Skip the first 12 bytes (DNS header)
@@ -242,6 +225,8 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 		log.Printf("Failed to parse DNS question: %v", err)
 		return
 	}
+
+	log.Printf("Parsed DNS questions: %+v", questions)
 
 	answers := make([]DNSAnswer, len(questions))
 	for i, question := range questions {
@@ -256,8 +241,12 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 		}
 	}
 
-	// Generate DNS reply
+	log.Printf("Constructed DNS answers: %+v", answers)
+
 	reply := createDNSReply(header, questions, answers)
+
+	log.Printf("Sending DNS reply to %s with ID: %d", addr.String(), header.ID)
+
 	_, err = conn.WriteToUDP(reply, addr)
 	if err != nil {
 		log.Printf("Failed to send DNS reply: %v", err)
