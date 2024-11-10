@@ -184,7 +184,43 @@ func parseName(data []byte, offset int) (string, int, error) {
 	return name, offset, nil
 }
 
+func decompressQuestions(data []byte) []byte {
+	decompressedData := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		// checks if question is compressed
+		// 0xC0 == 11000000 -> https://www.rfc-editor.org/rfc/rfc1035#section-4.1.4
+		// if first two bits are 1, then question is compressed and the following offset is
+		// a pointer to a previous position
+		if data[i] != 0xC0 {
+			decompressedData = append(decompressedData, data[i])
+			continue
+		}
+
+		// This part deals with the compression pointer
+		// 0xC0 is a pointer indicating the next byte is part of the pointer address
+		pointer := binary.BigEndian.Uint16(data[i : i+2])
+		// Logical AND to strip first two bits (0x3FFF = 0011111111111111)
+		pointerValue := int(pointer & 0x3FFF)
+		// Adjust because the pointer is relative to the start of the DNS packet header
+		pointerValue -= 12
+		// Resolve the pointer by copying the pointed-to name into decompressedData
+		for j := pointerValue; j < len(data); j++ {
+			if data[j] == 0x00 {
+				// End of the compressed name
+				decompressedData = append(decompressedData, data[j])
+				// Skip the next byte as it was part of the pointer
+				i += 1
+				break
+			}
+			// Add decompressed byte by byte
+			decompressedData = append(decompressedData, data[j])
+		}
+	}
+	return decompressedData
+}
+
 func parseDNSQuestions(data []byte, header DNSHeader) ([]DNSQuestion, error) {
+	expandedData := decompressQuestions(data)
 	questions := make([]DNSQuestion, header.QDCOUNT)
 	offset := 0
 
@@ -192,18 +228,18 @@ func parseDNSQuestions(data []byte, header DNSHeader) ([]DNSQuestion, error) {
 		var question DNSQuestion
 		var err error
 
-		question.Name, offset, err = parseName(data, offset)
+		question.Name, offset, err = parseName(expandedData, offset)
 		if err != nil {
 			return questions, err
 		}
 
-		if len(data) < offset+4 {
+		if len(expandedData) < offset+4 {
 			return questions, fmt.Errorf("invalid question format")
 		}
 
-		question.Type = binary.BigEndian.Uint16(data[offset : offset+2])
+		question.Type = binary.BigEndian.Uint16(expandedData[offset : offset+2])
 		offset += 2
-		question.Class = binary.BigEndian.Uint16(data[offset : offset+2])
+		question.Class = binary.BigEndian.Uint16(expandedData[offset : offset+2])
 		offset += 2
 
 		questions[i] = question
