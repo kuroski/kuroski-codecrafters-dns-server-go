@@ -2,10 +2,14 @@ package main
 
 import (
 	"encoding/binary"
+	"flag"
 	"fmt"
+	"golang.org/x/net/context"
 	"log"
 	"net"
+	"os"
 	"strings"
+	"time"
 )
 
 // DNSHeader represents a DNS message header
@@ -247,7 +251,7 @@ func parseDNSQuestions(data []byte, header DNSHeader) ([]DNSQuestion, error) {
 	return questions, nil
 }
 
-func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
+func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte, resolverAddr string) {
 	// Log the received packet
 	log.Printf("Received DNS query from %s with data: %v", addr.String(), data)
 
@@ -262,10 +266,26 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 		return
 	}
 
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{
+				Timeout: time.Millisecond * time.Duration(10000),
+			}
+			return d.DialContext(ctx, network, os.Args[2])
+		},
+	}
+
 	log.Printf("Parsed DNS questions: %+v", questions)
 
 	answers := make([]DNSAnswer, len(questions))
 	for i, question := range questions {
+		ips, err := resolver.LookupIP(context.Background(), "ip4", question.Name)
+		if err != nil {
+			continue
+		}
+		ip := ips[0].To4()
+
 		// Construct a sample answer
 		answers[i] = DNSAnswer{
 			Name:     question.Name,
@@ -273,7 +293,7 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 			Class:    1, // IN (Internet)
 			TTL:      60,
 			RDLength: 4,
-			RData:    []byte{8, 8, 8, 8},
+			RData:    []byte{ip[0], ip[1], ip[2], ip[3]},
 		}
 	}
 
@@ -293,6 +313,13 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 }
 
 func main() {
+	resolverAddr := flag.String("resolver", "", "Address of the DNS resolver to forward queries to in form <ip>:<port>")
+	flag.Parse()
+
+	if *resolverAddr == "" {
+		log.Fatalf("resolver address is required")
+	}
+
 	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:2053")
 	if err != nil {
 		fmt.Println("Failed to resolve UDP address:", err)
@@ -306,6 +333,8 @@ func main() {
 	}
 	defer udpConn.Close()
 
+	log.Printf("DNS forwarder running on %s, forwarding to %s", udpAddr, *resolverAddr)
+
 	for {
 		buf := make([]byte, 512) // DNS messages are usually limited to 512 bytes
 		n, addr, err := udpConn.ReadFromUDP(buf)
@@ -314,6 +343,6 @@ func main() {
 			continue
 		}
 
-		go handleDNSRequest(udpConn, addr, buf[:n])
+		go handleDNSRequest(udpConn, addr, buf[:n], *resolverAddr)
 	}
 }
