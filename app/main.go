@@ -7,7 +7,6 @@ import (
 	"golang.org/x/net/context"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"time"
 )
@@ -272,7 +271,7 @@ func handleDNSRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte, resolve
 			d := net.Dialer{
 				Timeout: time.Millisecond * time.Duration(10000),
 			}
-			return d.DialContext(ctx, network, os.Args[2])
+			return d.DialContext(ctx, network, resolverAddr)
 		},
 	}
 
